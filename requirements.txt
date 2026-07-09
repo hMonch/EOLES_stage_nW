@@ -1,4 +1,0 @@
-pyomo==6.4.4
-pandas==1.4.4
-numpy==1.23.5
-matplotlib==3.5.3
