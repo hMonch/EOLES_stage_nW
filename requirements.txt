@@ -1,0 +1,12 @@
+pandas==2.3.3
+numpy==1.26.4
+xarray==2025.6.1
+linopy==0.6.3
+matplotlib==3.10.8
+openpyxl==3.1.5
+
+# Solvers: linopy calls out to whichever solver_name you pass to model.solve().
+# ModelEOLES.solve() defaults to "gurobi" and falls back to "highs" if Gurobi
+# raises (e.g. no license found) - so both are listed here.
+gurobipy==13.0.1
+highspy==1.13.1

@@ -1,0 +1,46 @@
+{
+  "nb_optimisation_years": 1,
+  "years_of_interest": [2050],
+  "year_simulated": 2050,
+  "carbon_constraint": true,
+
+  "constants": "inputs/constants.csv",
+  "costs": "inputs/costs.csv",
+  "reserve": "inputs/reserve.csv",
+  "tech_parameters": "inputs/tech_parameters.csv",
+  "fuel_prices": "inputs/fuel_prices.csv",
+
+  "links": "inputs/area_indexed/links.csv",
+  "existing_capacity": "inputs/area_indexed/existing_capacity.csv",
+  "existing_energy_capacity": "inputs/area_indexed/existing_energy_capacity.csv",
+  "minimum_capacity": "inputs/area_indexed/minimum_capacity.csv",
+  "minimum_energy_capacity": "inputs/area_indexed/minimum_energy_capacity.csv",
+  "maximum_capacity": "inputs/area_indexed/maximum_capacity.csv",
+  "maximum_energy_capacity": "inputs/area_indexed/maximum_energy_capacity.csv",
+  "biogas_potential": "inputs/area_indexed/biogas_potential.csv",
+  "carbon_budget": "inputs/area_indexed/carbon_budget.csv",
+
+  "elec_demand": "inputs/time_varying_inputs/demand_elec.csv",
+  "H2_demand": "inputs/time_varying_inputs/demand_H2.csv",
+  "CH4_demand": "inputs/time_varying_inputs/demand_CH4.csv",
+
+  "prod_profile_offshore_float": "inputs/time_varying_inputs/renew_profiles/offshore_float.csv",
+  "prod_profile_offshore_ground": "inputs/time_varying_inputs/renew_profiles/offshore_ground.csv",
+  "prod_profile_onshore": "inputs/time_varying_inputs/renew_profiles/onshore.csv",
+  "prod_profile_pv_ground": "inputs/time_varying_inputs/renew_profiles/pv_ground.csv",
+  "prod_profile_pv_roof_com": "inputs/time_varying_inputs/renew_profiles/pv_roof_com.csv",
+  "prod_profile_pv_roof_indiv": "inputs/time_varying_inputs/renew_profiles/pv_roof_indiv.csv",
+  "prod_profile_river": "inputs/time_varying_inputs/renew_profiles/river.csv",
+  "prod_profile_biomass_coge": "inputs/time_varying_inputs/renew_profiles/biomass_coge.csv",
+  "prod_profile_geothermal_coge": "inputs/time_varying_inputs/renew_profiles/geothermal_coge.csv",
+  "prod_profile_waste": "inputs/time_varying_inputs/renew_profiles/waste.csv",
+  "prod_profile_marine": "inputs/time_varying_inputs/renew_profiles/marine.csv",
+  "prod_profile_ocgt_coge": "inputs/time_varying_inputs/renew_profiles/ocgt_coge.csv",
+
+  "phs_inflows": "inputs/time_varying_inputs/hydro_profiles/phs_inflows.csv",
+  "lake_inflows": "inputs/time_varying_inputs/hydro_profiles/lake_inflows.csv",
+  "lake_spill": "inputs/time_varying_inputs/hydro_profiles/lake_spill.csv",
+  "lake_minimal_volume": "inputs/time_varying_inputs/hydro_profiles/lake_minimal_volume.csv",
+  "lake_minimal_outflow": "inputs/time_varying_inputs/hydro_profiles/lake_minimal_outflow.csv"
+
+}

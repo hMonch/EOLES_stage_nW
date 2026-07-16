@@ -1,0 +1,21 @@
+Parameter,value,unit
+year_simulated,2050.0,
+social_cost_of_carbon,400.0,€/tCO2
+carbon_budget,0.0,MtCO2/y
+CO2_industry_demand,37245.0,GWh of CH4
+CO2_industry_prod,52087.0,GWh of CH4
+CO2_usable_industry,0.838,
+fcr_requirement,0.562,GW
+h2_saltcavern_discharge_to_storage_ratio,0.00658,
+h2_saltcavern_charge_to_storage_ratio,0.00168,
+load_shift_maximum_power,1.89e-05,/hour
+load_shift_period,6.0,hour
+load_uncertainty,0.01,
+load_variation,0.1,
+ch4_reservoir_charge_to_discharge_ratio,0.5,
+phs_charge_to_discharge_ratio,0.92,
+tr_loss,0.0001,
+biomethane_import,170.0,€/MWh
+annual_production_nuclear,78.04483,TWh
+capacity_factor_nuclear_yearly,0.7,
+limit_biogas_extra_import,240.0,TWh
