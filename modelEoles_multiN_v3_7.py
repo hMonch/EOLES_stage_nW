@@ -24,7 +24,7 @@ from utils_results import get_technical_cost, extract_curtailment, extract_hourl
     extract_power_to_CH4, extract_power_to_H2, extract_annualized_costs_investment_new_capa_nofOM, \
     extract_OM_cost, extract_carbon_value, extract_H2_to_power,\
     compute_costs, extract_summary, extract_balance, \
-    extract_profit, extract_carbon_footprint
+    extract_profit, extract_carbon_footprint, extract_reserve_generation
 
 # Functions used to plot outputs
 from utils_plots import plot_load_shift_week, plot_elec_balance_week, plot_elec_residual_balance_week, \
@@ -229,6 +229,8 @@ class ModelEOLES():
         ############################
 
         self.capacity_factor_nuclear_yearly = self.constants.loc["capacity_factor_nuclear_yearly"].value
+        self.max_capacity_factor_nuclear_hourly = self.constants.loc["max_CF_hourly_nuclear"].value
+        self.min_capacity_factor_nuclear_hourly = self.constants.loc["min_CF_hourly_nuclear"].value
 
         # Carbon
         self.scc = float(self.constants.loc["social_cost_of_carbon"].value)
@@ -936,8 +938,39 @@ class ModelEOLES():
 
         # Average annual generation can't exceed the planned/technical nuclear capacity factor
         # (accounts for scheduled outages/maintenance, unlike the hourly capacity bound).
-        yearly_nuc = self.gene.loc[{'tech':'nuclear'}].groupby(self.year).sum(dim="hour")
-        self.model.add_constraints(yearly_nuc / 8760 <= self.capacity_factor_nuclear_yearly * self.nominal_power.loc[{'tech':'nuclear'}], name="nuclear_yearly_CF")
+        # Reserve activation (FCR+FRR) counts towards it too, since it's real energy the same
+        # fleet would produce - detailed_countries only, since only they have fcr/frr variables
+        # at all (see reserve_power_prod etc. above).
+        nuclear_gene = self.gene.loc[{'tech': 'nuclear'}]
+        if self.detailed_countries:
+            yearly_nuc_fr = (nuclear_gene.loc[{"area": self.detailed_countries}].groupby(self.year).sum(dim="hour")
+                            + self.frr.loc[{"tech": "nuclear"}].groupby(self.year).sum(dim="hour") * self.reserve_activation_rate.loc["frr"]
+                            + self.fcr.loc[{"tech": "nuclear"}].groupby(self.year).sum(dim="hour") * self.reserve_activation_rate.loc["fcr"])
+            self.model.add_constraints(
+                yearly_nuc_fr / 8760 <= self.capacity_factor_nuclear_yearly * self.nominal_power.loc[{'tech': 'nuclear', "area": self.detailed_countries}],
+                name="nuclear_yearly_CF"
+            )
+            if self.non_detailed_countries:
+                yearly_nuc_non_fr = nuclear_gene.loc[{"area": self.non_detailed_countries}].groupby(self.year).sum(dim="hour")
+                self.model.add_constraints(
+                    yearly_nuc_non_fr / 8760 <= self.capacity_factor_nuclear_yearly * self.nominal_power.loc[{'tech': 'nuclear', "area": self.non_detailed_countries}],
+                    name="nuclear_yearly_CF_non_fr"
+                )
+        else:
+            yearly_nuc = nuclear_gene.groupby(self.year).sum(dim="hour")
+            self.model.add_constraints(yearly_nuc / 8760 <= self.capacity_factor_nuclear_yearly * self.nominal_power.loc[{'tech': 'nuclear'}], name="nuclear_yearly_CF")
+
+        # Hourly nuclear capacity factor bounds: never shut down, always between
+        # min/max_capacity_factor_nuclear_hourly of installed capacity (detailed_countries
+        # only - FR - since it relies on fcr/frr, same reasoning as above). Reserve activation
+        # counts as output here too, for consistency with the annual constraint and with the
+        # ramp constraint just below (nuclear_h_fr).
+        if self.detailed_countries:
+            hourly_nuc = (self.gene.loc[{'tech': 'nuclear', "area": self.detailed_countries}]
+                         + self.frr.loc[{"tech": "nuclear"}] + self.fcr.loc[{"tech": "nuclear"}])
+            nuclear_cap_fr = self.nominal_power.loc[{'tech': 'nuclear', "area": self.detailed_countries}]
+            self.model.add_constraints(hourly_nuc >= self.min_capacity_factor_nuclear_hourly * nuclear_cap_fr, name="hourly_min_nuc")
+            self.model.add_constraints(hourly_nuc <= self.max_capacity_factor_nuclear_hourly * nuclear_cap_fr, name="hourly_max_nuc")
 
         # Hour-to-hour ramp-rate limit (both directions); in detailed_countries, reserve
         # activation (FCR+FRR) counts towards the ramp too, since it also changes output.
@@ -1168,6 +1201,12 @@ class ModelEOLES():
                             self.from_elec_to_CH4, self.from_elec_to_H2, self.countries)
 
         self.load_factor = self.generation_per_technology*1000/(self.installed_power*8760*self.nb_years)*100
+
+        # Expected energy delivered via reserve activation (FRR+FCR) — kept separate from
+        # generation_per_technology on purpose (see extract_reserve_generation docstring).
+        # None when there's nothing to report (no detailed_countries, or reserves inactive).
+        self.generation_per_technology_res = extract_reserve_generation(
+            self.hourly_balance, self.reserve, self.reserve_activation_rate, self.detailed_countries)
 
         self.profits = extract_profit(self.hourly_balance, self.spot_price, self.vOM,
                                       self.new_capacity_annualized_costs, self.new_energy_capacity_annualized_costs,

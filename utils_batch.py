@@ -90,6 +90,36 @@ def aggregate_df(df, groups):
     return pd.DataFrame(result)
 
 
+def load_conversion_efficiency(tech=None):
+    """conversion_efficiency for one or more conversion techs (electrolysis, methanation, ...),
+    read straight from inputs/tech_parameters.csv - the same file and column the model itself
+    uses (self.conversion_efficiency in ModelEOLES.load_inputs). It's a single scalar per
+    tech (no area/year dimension), so it can be reused as-is on already-saved batch outputs.
+    Returns a float if tech is a single string, a dict {tech: value} if tech is a list/None."""
+    params = pd.read_csv(Path(__file__).parent / "inputs" / "tech_parameters.csv", index_col=0)
+    if isinstance(tech, str):
+        return float(params.loc[tech, "conversion_efficiency"])
+    techs = params["conversion_efficiency"].dropna().index if tech is None else tech
+    return {t: float(params.loc[t, "conversion_efficiency"]) for t in techs}
+
+
+def to_electric_equivalent(data_dict, conv_eff):
+    """Re-express conversion-tech columns (installed_power_GW/generation_per_tech_TWh's
+    electrolysis, methanation, ...) on their ELECTRICITY input basis instead of the model's
+    native output-side convention (H2 for electrolysis, CH4 for methanation) - divide by
+    conversion_efficiency, same as the model does internally to get gene_from_elec.
+    Returns a new dict of copied DataFrames; data_dict itself is left untouched, so this is
+    safe to use alongside cells that still need the original (output-side) values."""
+    out = {}
+    for label, df in data_dict.items():
+        df = df.copy()
+        for tech, eff in conv_eff.items():
+            if tech in df.columns:
+                df[tech] = df[tech] / eff
+        out[label] = df
+    return out
+
+
 def load_om_across_years(batch_dir, scenario, years, area=None):
     """Load OM_costs_M€yr.csv across years — per-country (area x tech, like the investment
     cost CSVs) since the OM_cost per-area fix. Pass area to select one country's breakdown;
@@ -247,6 +277,62 @@ def load_lost_load(batch_dir, scenario, years, countries, row_name="lost_load [%
     return pd.DataFrame(rows).pivot(index="year", columns="country", values="lost_load")
 
 
+def load_summary_row(batch_dir, scenario, years, area, row_name):
+    """A single summary.csv row (e.g. 'load_shifted [TWh]'), for one area, across years.
+    Returns a pd.Series indexed by year (empty if the row/area/file is never found)."""
+    rows = {}
+    for year in years:
+        # get_area_series handles single-area runs too (summary.csv's only column is
+        # literally named '0', not the area code, e.g. FR_alone) via its iloc[:, 0] fallback
+        s = get_area_series(run_dir(batch_dir, year, scenario) / "summary.csv", area)
+        if s is None or row_name not in s.index:
+            continue
+        rows[year] = pd.to_numeric(s[row_name], errors="coerce")
+    return pd.Series(rows, name=row_name)
+
+
+_LOAD_SHIFT_COEF = None
+
+
+def _load_shift_coef():
+    """The 'load_shift_maximum_power' constant from inputs/constants.csv — same file and
+    same row the model itself reads (see ModelEOLES.load_inputs). Cached after first read."""
+    global _LOAD_SHIFT_COEF
+    if _LOAD_SHIFT_COEF is None:
+        const = pd.read_csv(Path(__file__).parent / "inputs" / "constants.csv", index_col=0)
+        _LOAD_SHIFT_COEF = float(const.loc["load_shift_maximum_power", "value"])
+    return _LOAD_SHIFT_COEF
+
+
+def load_flex_potential(batch_dir, scenario, years, area):
+    """DSM load-shift potential [GW] for one area, across years. Meaningful only for
+    detailed_countries (France by default) — 0 or absent elsewhere.
+
+    Reads load_shift_maximum_power_GW.csv (written by save_results) when available. For
+    batches run before that CSV existed, falls back to reproducing the model's own formula
+    exactly instead of requiring a re-run:
+        load_shift_maximum_power[area] (GW) = coef * elec_demand.sum(hour)[area] (GWh) / nb_years
+    Every batch run covers exactly one climate year (nb_years=1, see run_batch.py), so that
+    hourly sum is just elec_demand_tot [TWh] (already in summary.csv) * 1000.
+    Returns a pd.Series indexed by year (empty if never found either way)."""
+    rows = {}
+    missing_years = []
+    for year in years:
+        path = run_dir(batch_dir, year, scenario) / "load_shift_maximum_power_GW.csv"
+        df = load_csv(path)
+        if df is None or area not in df.index:
+            missing_years.append(year)
+            continue
+        rows[year] = pd.to_numeric(df.loc[area].iloc[0], errors="coerce")
+
+    if missing_years:
+        demand = load_summary_row(batch_dir, scenario, missing_years, area, "elec_demand_tot [TWh]")
+        for year, val in (demand * 1000 * _load_shift_coef()).items():
+            rows[year] = val
+
+    return pd.Series(rows, name="DSM_potential").sort_index()
+
+
 def load_curtailment(batch_dir, scenario, years, countries):
     """Curtailment [%] and [TWh] per country/year from summary.csv, each pivoted
     (index=year, columns=country). Returns (pct_df, twh_df)."""
@@ -327,6 +413,31 @@ def load_capacity_duals(batch_dir, scenario, years, group):
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def find_capacity_binding_years(batch_dir, scenario, years, area, atol=1e-6):
+    """For each tech whose max-capacity constraint is binding (dual != 0) in at least one
+    year, list which years it's binding in, for one (scenario, area). Combines all three
+    capacity-dual groups (prod/conv/str) — see load_capacity_duals.
+
+    Returns
+    -------
+    pd.DataFrame indexed by tech, columns: binding_years (list), n_years (int) — sorted by
+    n_years descending. Empty DataFrame if no dual files are found or nothing is binding.
+    """
+    frames = [load_capacity_duals(batch_dir, scenario, years, g) for g in ("prod", "conv", "str")]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=["binding_years", "n_years"])
+    df = pd.concat(frames, ignore_index=True)
+    df = df[df["area"] == area].copy()
+    df["dual"] = pd.to_numeric(df["dual"], errors="coerce")
+    binding = df[df["dual"].abs() > atol]
+    if binding.empty:
+        return pd.DataFrame(columns=["binding_years", "n_years"])
+    result = binding.groupby("tech")["year"].apply(lambda s: sorted(s.unique().tolist())).to_frame("binding_years")
+    result["n_years"] = result["binding_years"].apply(len)
+    return result.sort_values("n_years", ascending=False)
+
+
 def load_annual_dual(batch_dir, scenario, years, name):
     """Load dual_{name}.csv (e.g. 'annual_methanization', 'methanation_CO2') across years into
     one long DataFrame. Columns depend on whether the constraint has an 'area' dimension."""
@@ -344,8 +455,11 @@ def load_annual_dual(batch_dir, scenario, years, name):
 def load_interconnection_stats(batch_dir, scenario, years):
     """Average interconnection_stats.csv (written by save_interconnection_stats) across years.
     Returns a DataFrame with one row per (direction, partner), columns cap_gw, mean_util_pct,
-    mean_flow_gw, pct_hours_at_full, pct_hours_idle, energy_twh averaged across the years found."""
-    numeric_cols = ["cap_gw", "mean_util_pct", "mean_flow_gw", "pct_hours_at_full", "pct_hours_idle", "energy_twh"]
+    mean_flow_gw, pct_hours_at_full, pct_hours_idle, energy_twh, congestion_rent_M€yr (M€/yr,
+    only present for batches saved after this session's save_interconnection_stats update)
+    averaged across the years found."""
+    numeric_cols = ["cap_gw", "mean_util_pct", "mean_flow_gw", "pct_hours_at_full", "pct_hours_idle",
+                    "energy_twh", "congestion_rent_M€yr"]
     frames = []
     for year in years:
         path = run_dir(batch_dir, year, scenario) / "interconnection_stats.csv"
@@ -356,5 +470,111 @@ def load_interconnection_stats(batch_dir, scenario, years):
     if not frames:
         return pd.DataFrame()
     all_df = pd.concat(frames, ignore_index=True)
+    numeric_cols = [c for c in numeric_cols if c in all_df.columns]
     all_df[numeric_cols] = all_df[numeric_cols].apply(pd.to_numeric, errors="coerce")
     return all_df.groupby(["direction", "partner"], as_index=False)[numeric_cols].mean()
+
+
+def load_import_capacity(batch_dir, scenario, years, area):
+    """Total import capacity into `area` [GW], per year: sum of cap_gw over every
+    interconnection_stats.csv row whose direction is 'partner→area' (i.e. flowing INTO area).
+    cap_interco is a fixed model input (not a decision variable - see ModelEOLES.load_inputs),
+    so this is typically constant across years for a given scenario, but reading it per year
+    stays correct if that ever changes. Returns a pd.Series indexed by year (empty if never
+    found)."""
+    rows = {}
+    for year in years:
+        path = run_dir(batch_dir, year, scenario) / "interconnection_stats.csv"
+        df = load_csv(path, index_col=None)
+        if df is None or "direction" not in df.columns:
+            continue
+        into_area = df[df["direction"].str.endswith(f"→{area}")]
+        if into_area.empty:
+            continue
+        rows[year] = pd.to_numeric(into_area["cap_gw"], errors="coerce").sum()
+    return pd.Series(rows, name="Imports").sort_index()
+
+
+RENEWABLE_TECHS_DEFAULT = ("pv_ground", "pv_roof_com", "pv_roof_indiv",
+                          "onshore", "offshore_ground", "offshore_float",
+                          "river", "lake")
+
+
+def load_area_renewable_prod(batch_dir, scenario, years, areas, techs=RENEWABLE_TECHS_DEFAULT):
+    """Renewable generation [TWh/yr] summed over `techs` (default: solar+wind+hydro, i.e.
+    river+lake), per year, for each area in `areas`. Returns a DataFrame indexed by year,
+    one column per area (areas with no data at all are simply absent)."""
+    cols = {}
+    for area in areas:
+        df = load_across_years(batch_dir, "generation_per_tech_TWh", scenario, years, area)
+        if df.empty:
+            continue
+        avail = [t for t in techs if t in df.columns]
+        cols[area] = df[avail].sum(axis=1) if avail else pd.Series(0.0, index=df.index)
+    return pd.DataFrame(cols)
+
+
+# Techs subtracted from raw demand to get "pre-DSM" residual demand - must match
+# utils_results.compute_residual_demand's vre_techs list exactly (that's the definition
+# these peaks are meant to be comparable with).
+_PRE_DSM_VRE_TECHS = ("pv_ground", "pv_roof_com", "pv_roof_indiv",
+                     "onshore", "offshore_ground", "offshore_float",
+                     "river", "marine")
+
+_PROFILE_PATHS = {
+    "pv_ground":       "inputs/time_varying_inputs/renew_profiles/pv_ground.csv",
+    "pv_roof_com":     "inputs/time_varying_inputs/renew_profiles/pv_roof_com.csv",
+    "pv_roof_indiv":   "inputs/time_varying_inputs/renew_profiles/pv_roof_indiv.csv",
+    "onshore":         "inputs/time_varying_inputs/renew_profiles/onshore.csv",
+    "offshore_ground": "inputs/time_varying_inputs/renew_profiles/offshore_ground.csv",
+    "offshore_float":  "inputs/time_varying_inputs/renew_profiles/offshore_float.csv",
+    "river":           "inputs/time_varying_inputs/renew_profiles/river.csv",
+    "marine":          "inputs/time_varying_inputs/renew_profiles/marine.csv",
+}
+_DEMAND_PATH = "inputs/time_varying_inputs/demand_elec.csv"
+
+
+def compute_pre_dsm_residual_peak(batch_dir, scenario, years, area):
+    """Peak hourly residual demand [GW] BEFORE demand-side load-shifting (DSM), per year,
+    for one area — reconstructed straight from the model's own raw inputs, with no need to
+    re-run it:
+        residual(h) = elec_demand(h) - sum_tech( capacity[tech] * vre_profile[tech](h) )
+    using (1) the exact same hourly demand/VRE-profile input files the model itself reads
+    (config_multi_nodes.json's "elec_demand"/"prod_profile_*" — these vary per climate year,
+    so no re-run is needed to get the right year's weather), and (2) that year's already-
+    solved installed capacity (installed_power_GW.csv, from the batch output).
+
+    For batches produced after this session's save_residual_load update, prefer reading
+    residual_load_stats.csv's own "peak_gw_pre_dsm" column directly (exact, from the solved
+    model) via load_residual_load_stats — this function exists for batches run before that,
+    or to avoid a 24h batch re-run just for this. Values should match closely either way,
+    since both use the identical vre_techs list and the same capacity x profile relationship
+    the model itself enforces (see 'vre_generation_prod'/'vre_generation_conversion').
+
+    Returns a pd.Series indexed by year (empty if the area/demand file is never found)."""
+    demand_full = pd.read_csv(Path(__file__).parent / _DEMAND_PATH, index_col=0, parse_dates=True)
+    if area not in demand_full.columns:
+        return pd.Series(dtype=float, name="peak_gw_pre_dsm")
+
+    profiles_full = {}
+    for tech, path in _PROFILE_PATHS.items():
+        df = pd.read_csv(Path(__file__).parent / path, index_col=0, parse_dates=True)
+        if area in df.columns:
+            profiles_full[tech] = df[area]
+
+    rows = {}
+    for year in years:
+        cap = get_area_series(run_dir(batch_dir, year, scenario) / "installed_power_GW.csv", area)
+        demand_y = demand_full.loc[demand_full.index.year == year, area]
+        if cap is None or demand_y.empty:
+            continue
+        residual = demand_y.to_numpy(copy=True)
+        for tech, prof_full in profiles_full.items():
+            if tech not in cap.index:
+                continue
+            prof_y = prof_full[prof_full.index.year == year].to_numpy()
+            if len(prof_y) != len(residual):
+                continue
+            residual = residual - float(cap[tech]) * prof_y
+        rows[year] = float(residual.max())
+    return pd.Series(rows, name="peak_gw_pre_dsm").sort_index()

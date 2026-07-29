@@ -296,6 +296,45 @@ def extract_H2_to_power(from_H2_to_elec, conversion_efficiency, nb_years, hourly
     return H2_to_power_input
 
 
+def extract_reserve_generation(hourly_balance, reserve, reserve_activation_rate, detailed_countries):
+    """Expected energy delivered via reserve activation (FRR+FCR), per reserve-providing tech
+    and area — restricted to `detailed_countries` (the only areas with real fcr/frr data).
+    Unit: TWh over the full simulation (same convention as generation_per_technology, i.e.
+    NOT divided by nb_years — divide yourself for a per-year figure).
+
+    This energy is deliberately NOT part of generation_per_technology: the electricity
+    adequacy balance (see ModelEOLES.define_constraints) only counts self.gene/conv_output/
+    str_output as supply, treating frr/fcr as a parallel capacity-reservation mechanism
+    costed/valued at its statistical activation rate (reserve_activation_rate) rather than
+    physically dispatched into the hourly balance. This function surfaces that expected-value
+    energy separately, purely for reporting.
+
+    Returns None if there is no reserve to report (no detailed_countries, or activation
+    energy negligible — e.g. include_reserve=False), so callers can skip writing an
+    empty/all-zero file.
+    """
+    if not detailed_countries:
+        return None
+
+    frr_vars = [f"{t}_frr" for t in reserve.values if f"{t}_frr" in hourly_balance.data_vars]
+    fcr_vars = [f"{t}_fcr" for t in reserve.values if f"{t}_fcr" in hourly_balance.data_vars]
+    if not frr_vars or not fcr_vars:
+        return None
+
+    frr_energy = (hourly_balance[frr_vars].to_array("tech").fillna(0.0)
+                 .assign_coords(tech=[v[:-len("_frr")] for v in frr_vars])
+                 .sel(area=detailed_countries).sum("hour")) * reserve_activation_rate.loc["frr"] / 1000
+    fcr_energy = (hourly_balance[fcr_vars].to_array("tech").fillna(0.0)
+                 .assign_coords(tech=[v[:-len("_fcr")] for v in fcr_vars])
+                 .sel(area=detailed_countries).sum("hour")) * reserve_activation_rate.loc["fcr"] / 1000
+
+    reserve_generation = frr_energy + fcr_energy
+    reserve_generation = reserve_generation.where(~np.isclose(reserve_generation, 0, atol=1e-6), 0)
+    if float(reserve_generation.sum().values) <= 1e-6:
+        return None
+    return reserve_generation
+
+
 def extract_power_to_CH4(from_elec_to_CH4, conversion_efficiency, nb_years, hourly_balance):
     """Extracts electricity generation necessary to produce CH4 in TWh"""
     power_to_CH4_input = (hourly_balance[[f"{tech}_input" for tech in from_elec_to_CH4.values]]
@@ -898,6 +937,25 @@ def extract_summary(objective, model, elec_demand, H2_demand, H2_demand_is_profi
         summary.at["CH4_exports [TWh/yr]"] = ch4_export_val
         summary.at["CH4_net_imports [TWh/yr]"] = ch4_import_val - ch4_export_val
 
+        # H2 inter-country trade: same pattern as CH4 above. Named "H2_trade_*" (not just
+        # "H2_imports") to not be confused with "H2_import [TWh/yr]" above, which is the
+        # exogenous H2_import FACILITY tech (an import capacity producing H2 domestically),
+        # a completely different thing from country-to-country H2 trade.
+        h2_imp_key, h2_exp_key = "H2 annual import", "H2 annual export"
+        if h2_imp_key in model.solution and h2_exp_key in model.solution:
+            h2_imp_a = model.solution[h2_imp_key]
+            h2_exp_a = model.solution[h2_exp_key]
+            h2_imp_a = h2_imp_a.sel(area=area) if "area" in h2_imp_a.dims else h2_imp_a
+            h2_exp_a = h2_exp_a.sel(area=area) if "area" in h2_exp_a.dims else h2_exp_a
+            h2_trade_import_val = float(h2_imp_a.sum().values) / nb_years
+            h2_trade_export_val = float(h2_exp_a.sum().values) / nb_years
+        else:
+            h2_trade_import_val = 0.0
+            h2_trade_export_val = 0.0
+        summary.at["H2_trade_imports [TWh/yr]"] = h2_trade_import_val
+        summary.at["H2_trade_exports [TWh/yr]"] = h2_trade_export_val
+        summary.at["H2_net_trade_imports [TWh/yr]"] = h2_trade_import_val - h2_trade_export_val
+
         # Vector conversion costs (monetary value) - area specific
         if "area" in hourly_balance.dims:
             hb_conv = hourly_balance.loc[{"area": area}]
@@ -909,7 +967,18 @@ def extract_summary(objective, model, elec_demand, H2_demand, H2_demand_is_profi
             sp_elec = spot_price["elec"]
             sp_ch4 = spot_price["CH4"]
             sp_h2 = spot_price["H2"]
-        
+
+        # CH4/H2 trade cost/revenue (M€/yr): the trade variables are annual (one value per
+        # year, no genuine hourly granularity), so this uses each vector's constant annual
+        # price for the area rather than an hourly-weighted average - .mean() just collapses
+        # the (redundant, already-constant) hour dimension that spot_price broadcasts onto.
+        _sp_ch4_annual = float(np.atleast_1d(sp_ch4.mean().values if hasattr(sp_ch4, "mean") else sp_ch4)[0])
+        _sp_h2_annual  = float(np.atleast_1d(sp_h2.mean().values if hasattr(sp_h2, "mean") else sp_h2)[0])
+        summary.at["CH4_import_cost [M€/yr]"] = ch4_import_val * _sp_ch4_annual
+        summary.at["CH4_export_revenue [M€/yr]"] = ch4_export_val * _sp_ch4_annual
+        summary.at["H2_trade_import_cost [M€/yr]"] = h2_trade_import_val * _sp_h2_annual
+        summary.at["H2_trade_export_revenue [M€/yr]"] = h2_trade_export_val * _sp_h2_annual
+
         # G2P (gas to power) costs
         ch4_to_elec_techs = [f"{tech}_input" for tech in from_CH4_to_elec.values if f"{tech}_input" in hb_conv.data_vars]
         h2_to_elec_techs = [f"{tech}_input" for tech in from_H2_to_elec.values if f"{tech}_input" in hb_conv.data_vars]
@@ -2006,7 +2075,7 @@ def check_profit_dual_consistency(profits, capacity_duals, capacity, existing_ca
     return pd.DataFrame(rows).set_index("tech")
 
 
-def compute_residual_demand(hourly_balance, area=None):
+def compute_residual_demand(hourly_balance, area=None, use_shifted=True):
     """
     Calcule la demande résiduelle horaire = demande - production ENR variable.
 
@@ -2018,6 +2087,10 @@ def compute_residual_demand(hourly_balance, area=None):
     ----------
     hourly_balance : xr.Dataset  — m.hourly_balance
     area           : str or None — None = somme toutes zones
+    use_shifted    : bool — True (default) uses elec_demand_w_shift (net of DSM load-shifting)
+        when available, matching what the model actually dispatches against. False forces
+        the raw elec_demand (pre-DSM), useful to size flexible/dispatchable capacity against
+        the UNSHIFTED peak (DSM's whole point is to shave it).
 
     Returns
     -------
@@ -2039,7 +2112,10 @@ def compute_residual_demand(hourly_balance, area=None):
             return hb[var].values.flatten()
         return np.zeros(n_hours)
 
-    demand = _g("elec_demand_w_shift") if "elec_demand_w_shift" in hb.data_vars else _g("elec_demand")
+    if use_shifted:
+        demand = _g("elec_demand_w_shift") if "elec_demand_w_shift" in hb.data_vars else _g("elec_demand")
+    else:
+        demand = _g("elec_demand")
 
     vre_techs = [
         "pv_ground", "pv_roof_com", "pv_roof_indiv",
@@ -2238,8 +2314,17 @@ def save_results(m, output_dir, export_hourly=False):
     # ── 3. Energy capacity [GWh] — tech × area ───────────────────────────────
     to_csv(m.energy_capacity, p / "energy_capacity_GWh.csv")
 
+    # ── 3b. DSM load-shift potential [GW] — area only (meaningful for detailed_countries,
+    # France by default; computed for all areas but only used/constrained there) ───────────
+    to_csv(m.load_shift_maximum_power.rename("load_shift_maximum_power"), p / "load_shift_maximum_power_GW.csv")
+
     # ── 4. Generation per technology [TWh/yr] — tech × area ──────────────────
     to_csv(m.generation_per_technology, p / "generation_per_tech_TWh.csv")
+    # Reserve-activation energy (FRR+FCR), separate from the above on purpose — see
+    # extract_reserve_generation. Only written when there's actually something to report
+    # (detailed_countries non-empty and reserves active).
+    if getattr(m, "generation_per_technology_res", None) is not None:
+        to_csv(m.generation_per_technology_res, p / "generation_per_tech_res_TWh.csv")
 
     # ── 5. Load factor [%] ───────────────────────────────────────────────────
     to_csv(m.load_factor, p / "load_factor_pct.csv")
@@ -2344,7 +2429,14 @@ def save_results(m, output_dir, export_hourly=False):
 def save_interconnection_stats(m, output_dir, links_csv="inputs/area_indexed/links.csv", ic_area="FR"):
     """Export hourly interconnection utilization stats for `ic_area`'s cross-border links
     to {output_dir}/interconnection_stats.csv. No-op if there are no interconnections
-    (single-country run) or if links_csv is missing."""
+    (single-country run) or if links_csv is missing.
+
+    Also computes each link direction's congestion rent (M€/yr): the importer pays its own
+    local spot price for what it actually receives (post tr_loss), the exporter is credited
+    its own local spot price for what it sends (pre-loss, same convention as
+    compute_country_cost_summary's export_revenue) - the gap between the two is the
+    merchandising surplus captured by the interconnection itself (zonal-price arbitrage),
+    not lost or double-counted anywhere else."""
     links_path = Path(links_csv)
     if not links_path.exists():
         print(f"    [warn] links.csv not found at {links_path}")
@@ -2352,6 +2444,15 @@ def save_interconnection_stats(m, output_dir, links_csv="inputs/area_indexed/lin
     sol = m.model.solution
     if "export" not in sol:
         return  # single-country run: no interconnections
+
+    sp_elec = getattr(m, "spot_price", {}).get("elec") if getattr(m, "spot_price", None) is not None else None
+    tr_loss = getattr(m, "tr_loss", 0.0)
+
+    def _price(area):
+        if sp_elec is None:
+            return None
+        sp = sp_elec.sel(area=area) if "area" in sp_elec.dims else sp_elec
+        return sp.values.flatten()
 
     links = pd.read_csv(links_path, index_col=0)
     rows = []
@@ -2369,9 +2470,16 @@ def save_interconnection_stats(m, output_dir, links_csv="inputs/area_indexed/lin
                 flow = sol["export"].sel(area=area_from, area_bis=area_to).values.flatten()
                 util = flow / cap * 100
                 n_h  = len(flow)
+                rent_m = None
+                sp_from, sp_to = _price(area_from), _price(area_to)
+                if sp_from is not None and sp_to is not None:
+                    export_revenue_m = float((flow * sp_from / 1000).sum())
+                    import_cost_m = float((flow * (1 - tr_loss) * sp_to / 1000).sum())
+                    rent_m = import_cost_m - export_revenue_m
                 rows.append({
                     "direction":         f"{area_from}→{area_to}",
                     "partner":           partner,
+                    "congestion_rent_M€yr": rent_m,
                     "cap_gw":            cap,
                     "mean_util_pct":     float(util.mean()),
                     "mean_flow_gw":      float(flow.mean()),

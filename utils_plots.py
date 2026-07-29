@@ -960,10 +960,9 @@ def plot_storage_state_year(hourly_balance, hour, nb_years=1, area=None, select_
             elec_str["PHS"] = hourly_balance["phs_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
         if "battery" in select_tech:
             battery_state = np.zeros(8760*nb_years)
-            if "battery_1h_state_charge" in hourly_balance.data_vars:
-                battery_state += hourly_balance["battery_1h_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
-            if "battery_4h_state_charge" in hourly_balance.data_vars:
-                battery_state += hourly_balance["battery_4h_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
+            for _bt in ["battery_1h", "battery_2h", "battery_4h", "battery_8h"]:
+                if f"{_bt}_state_charge" in hourly_balance.data_vars:
+                    battery_state += hourly_balance[f"{_bt}_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
             if battery_state.sum() > 0:
                 elec_str["Batteries"] = battery_state
         if "str_dummy" in select_tech and "str_dummy_state_charge" in hourly_balance.data_vars:
@@ -980,10 +979,9 @@ def plot_storage_state_year(hourly_balance, hour, nb_years=1, area=None, select_
             elec_str["STEP"] = hourly_balance["phs_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
         if "battery" in select_tech:
             battery_state = np.zeros(8760*nb_years)
-            if "battery_1h_state_charge" in hourly_balance.data_vars:
-                battery_state += hourly_balance["battery_1h_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
-            if "battery_4h_state_charge" in hourly_balance.data_vars:
-                battery_state += hourly_balance["battery_4h_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
+            for _bt in ["battery_1h", "battery_2h", "battery_4h", "battery_8h"]:
+                if f"{_bt}_state_charge" in hourly_balance.data_vars:
+                    battery_state += hourly_balance[f"{_bt}_state_charge"].isel(hour=slice(hour, hour+8760*nb_years)).values
             if battery_state.sum() > 0:
                 elec_str["Batteries"] = battery_state
         if "str_dummy" in select_tech and "str_dummy_state_charge" in hourly_balance.data_vars:
@@ -2153,6 +2151,7 @@ TECH_COLORS = {
     'h2_saltcavern_input': '#90A4AE', 'h2_ccgt_input': '#FF6F00',
     'demand': '#455A64', 'curtailment': '#CFD8DC',
     'Solaire': '#F9A825', 'Offshore': '#1565C0', 'Hydro': '#26C6DA',
+    'load_shifted': '#A5D6A7', 'DSM_potential': '#A5D6A7',
 }
 
 TECH_LABELS_FR = {
@@ -2179,6 +2178,7 @@ TECH_LABELS_FR = {
     'h2_saltcavern_input': 'Caverne H₂ (charge)', 'h2_ccgt_input': 'CCGT H₂',
     'demand': 'Demande finale', 'curtailment': 'Écrêtement',
     'Solaire': 'Solaire (total)', 'Offshore': 'Éolien offshore', 'Hydro': 'Hydro (fil + lacs)',
+    'load_shifted': 'DSM', 'DSM_potential': 'DSM',
 }
 
 TECH_LABELS_EN = {
@@ -2198,6 +2198,7 @@ TECH_LABELS_EN = {
     'H2_import': 'H2 import', 'coal': 'Coal', 'lost_load': 'Unserved demand',
     'demand': 'Final demand', 'curtailment': 'Curtailment',
     'Solaire': 'Solar (total)', 'Offshore': 'Offshore wind', 'Hydro': 'Hydro (river + dams)',
+    'load_shifted': 'DSM', 'DSM_potential': 'DSM',
 }
 
 # Placeholder / non-physical techs excluded by default from summary charts.
@@ -2313,8 +2314,12 @@ def plot_min_mean_max(data_dict, title, unit, min_val=0.01, exclude=None,
         labels_list = list(stats.keys())
         leg.append(mpatches.Patch(color='grey', alpha=0.9, hatch='', label=labels_list[0]))
         if len(labels_list) > 1:
-            leg.append(mpatches.Patch(color='grey', alpha=0.9, hatch='///', label=labels_list[1]))
-    ax.legend(handles=leg, loc='lower right', fontsize=9, ncol=2)
+            # hatch renders in edgecolor, so it needs a color other than grey to actually show up
+            leg.append(mpatches.Patch(facecolor='white', edgecolor='black', hatch='///', label=labels_list[1]))
+    # hatch.linewidth is read at render/savefig time (not patch creation), so this must be set
+    # globally rather than via rc_context, otherwise it reverts before the figure is drawn
+    mpl.rcParams['hatch.linewidth'] = 2.2
+    ax.legend(handles=leg, loc='lower right', fontsize=22, ncol=2, handlelength=2.2, handleheight=1.6)
     plt.tight_layout()
     return fig
 
@@ -2327,6 +2332,94 @@ def compute_stats_local(df):
 def filter_techs_local(stats_df, min_val=0.01, exclude=frozenset()):
     mask = (stats_df['max'] >= min_val) & (~stats_df.index.isin(exclude))
     return stats_df[mask].sort_values('mean', ascending=True)
+
+
+def plot_cost_pie(data_dict, title, tech_colors=None, tech_labels=None, min_pct=1.0,
+                  unit_divisor=1000, unit_label='Md€/yr', outside_pct=5.0):
+    """One pie chart per scenario in data_dict, showing the MEAN (across years) cost per
+    category — a single-number companion to plot_min_mean_max's min/mean/max bars, for the
+    same data_dict shape.
+
+    Slices below `outside_pct` get their value label pushed OUTSIDE the pie (with a leader
+    line) instead of centered on the wedge, since several small wedges packed together
+    otherwise overlap their in-place labels.
+
+    Parameters
+    ----------
+    data_dict : dict {label: pd.DataFrame(index=year, columns=category)} — e.g.
+        utils_batch.build_area_cost_by_group's output (M-EUR/yr).
+    title : str
+    tech_colors, tech_labels : dict, optional — default to TECH_COLORS/TECH_LABELS_FR, same
+        defaults as plot_min_mean_max, so colors/labels stay consistent between the two charts.
+    min_pct : float — categories below this % of the scenario's total are folded into an
+        "Other" slice, to keep tiny wedges from cluttering the chart.
+    unit_divisor, unit_label : rescale the input values for display (default: /1000 -> Md€/yr,
+        since cost data_dicts are typically in M-EUR/yr).
+    outside_pct : float — slices below this % of the total get their label placed outside
+        the pie with a leader line, rather than inside the wedge.
+
+    Returns
+    -------
+    fig
+    """
+    tech_colors = TECH_COLORS if tech_colors is None else tech_colors
+    tech_labels = TECH_LABELS_FR if tech_labels is None else tech_labels
+
+    scenarios = [(label, df) for label, df in data_dict.items() if not df.empty]
+    if not scenarios:
+        print('No data to plot.')
+        return None
+
+    fig, axes = plt.subplots(1, len(scenarios), figsize=(8 * len(scenarios), 7.5))
+    axes = [axes] if len(scenarios) == 1 else list(axes)
+
+    for ax, (label, df) in zip(axes, scenarios):
+        mean = df.apply(pd.to_numeric, errors='coerce').mean() / unit_divisor
+        mean = mean[mean > 0]
+        if mean.empty:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+            ax.set_title(label, fontweight='bold')
+            continue
+        total = mean.sum()
+        small_mask = mean / total * 100 < min_pct
+        big = mean[~small_mask].sort_values(ascending=False)
+        if small_mask.any():
+            big['Other'] = big.get('Other', 0) + mean[small_mask].sum()
+
+        colors = [tech_colors.get(t, '#888') for t in big.index]
+        names = [tech_labels.get(t, t) for t in big.index]
+        pcts = big.values / total * 100
+
+        wedges, _ = ax.pie(big.values, colors=colors, startangle=90,
+                           wedgeprops={'edgecolor': 'white', 'linewidth': 0.8})
+
+        n_left = n_right = 0
+        max_r = 1.0
+        for wedge, name, val, pct in zip(wedges, names, big.values, pcts):
+            mid = np.deg2rad((wedge.theta1 + wedge.theta2) / 2)
+            x, y = np.cos(mid), np.sin(mid)
+            text = f'{name}\n{val:.1f} {unit_label} ({pct:.0f}%)'
+            if pct >= outside_pct:
+                ax.text(x * 0.65, y * 0.65, text, ha='center', va='center', fontsize=7)
+            else:
+                if x >= 0:
+                    n_right += 1
+                    r, ha = 1.15 + 0.22 * (n_right - 1), 'left'
+                else:
+                    n_left += 1
+                    r, ha = 1.15 + 0.22 * (n_left - 1), 'right'
+                max_r = max(max_r, r)
+                ax.annotate('', xy=(x, y), xytext=(r * x, r * y),
+                           arrowprops=dict(arrowstyle='-', color='#999999', lw=0.8))
+                ax.text(r * x, r * y, text, ha=ha, va='center', fontsize=6.5)
+
+        ax.set_xlim(-max_r - 0.3, max_r + 0.3)
+        ax.set_ylim(-max_r - 0.3, max_r + 0.3)
+        ax.set_title(f'{label}\nTotal : {total:.1f} {unit_label}', fontweight='bold')
+
+    fig.suptitle(title, fontsize=13)
+    plt.tight_layout()
+    return fig
 
 
 def plot_category_timeseries(data_by_scenario_year, categories, category_colors=None,
@@ -2371,6 +2464,9 @@ def plot_category_timeseries(data_by_scenario_year, categories, category_colors=
         ax.legend(loc='best', fontsize=8, framealpha=0.8)
         ax.grid(alpha=0.25)
         ax.tick_params(axis='x', rotation=45)
+        # Years are integers - force integer-only tick locations so matplotlib doesn't pick
+        # a fractional step (e.g. 2040.0, 2042.5, 2045.0...) when few years are plotted.
+        ax.xaxis.set_major_locator(mpl.ticker.MaxNLocator(integer=True))
 
     fig.suptitle(title, fontweight='bold', fontsize=13)
     plt.tight_layout()
@@ -2824,6 +2920,91 @@ def plot_interconnection_diverging(stats_df, area, lang='FR', figsize_w=9):
     return fig, ax
 
 
+def plot_interconnection_flows_week(sol, links_df, area, hourly_balance, hour, n_hours=14*24, lang="EN"):
+    """Hourly import/export flows between `area` and each interconnected partner, over a
+    chosen time window (e.g. a problematic multi-week period identified elsewhere).
+
+    Imports (partner -> area) are stacked ABOVE zero, exports (area -> partner) stacked
+    BELOW zero (mirrored) — one ribbon per partner, same color used for both its import and
+    export flow (e.g. FR-DE always shown in the same color, whichever direction).
+
+    Parameters
+    ----------
+    sol : the solved linopy model's solution (m.model.solution) — needs the 'export' variable
+        (absent for a single-country, no-interconnection run).
+    links_df : pd.DataFrame — inputs/area_indexed/links.csv, index=area, columns=area.
+    area : str — the focus country (e.g. "FR").
+    hourly_balance : xr.Dataset — used only to build the time axis (extract_time_index);
+        can carry an "area" dim or not, doesn't need to be pre-selected to `area`.
+    hour : int — starting hour index of the window.
+    n_hours : int — window length in hours (default: 14 days).
+    lang : "FR" or "EN"
+
+    Returns
+    -------
+    (fig, ax) or (None, None) if no interconnection data is available for `area`.
+    """
+    if "export" not in sol:
+        print("[!] 'export' variable absent (no-interconnection run?)")
+        return None, None
+
+    partners = []
+    for partner in links_df.columns:
+        if partner == area:
+            continue
+        cap_exp = links_df.loc[area, partner] if area in links_df.index else np.nan
+        cap_imp = links_df.loc[partner, area] if partner in links_df.index else np.nan
+        if (pd.notna(cap_exp) and cap_exp > 0) or (pd.notna(cap_imp) and cap_imp > 0):
+            partners.append(partner)
+    if not partners:
+        print(f"[!] No interconnection data for {area}.")
+        return None, None
+
+    sl = slice(hour, hour + n_hours)
+    hb_time = hourly_balance.sel(area=area) if "area" in hourly_balance.dims else hourly_balance
+    time = extract_time_index(hb_time, hour, n_hours)
+
+    palette = plt.get_cmap("tab10").colors if len(partners) <= 10 else plt.get_cmap("tab20").colors
+    colors = [palette[i % len(palette)] for i in range(len(partners))]
+
+    imports, exports = [], []
+    for partner in partners:
+        try:
+            imp_flow = sol["export"].sel(area=partner, area_bis=area).isel(hour=sl).values
+        except Exception:
+            imp_flow = np.zeros(n_hours)
+        try:
+            exp_flow = sol["export"].sel(area=area, area_bis=partner).isel(hour=sl).values
+        except Exception:
+            exp_flow = np.zeros(n_hours)
+        imports.append(imp_flow)
+        exports.append(-exp_flow)  # negative so exports are drawn below zero
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    ax.stackplot(time, *imports, labels=partners, colors=colors, alpha=0.85)
+    ax.stackplot(time, *exports, colors=colors, alpha=0.85)
+    ax.axhline(0, color="black", linewidth=1)
+
+    ax.set_ylabel(f"GW\n{'<- Export | Import ->' if lang == 'EN' else '<- Export | Import ->'}")
+    ax.set_title(
+        f"{area} — Interconnection flows per partner" if lang == "EN"
+        else f"{area} — Flux d'interconnexion par partenaire",
+        fontweight="bold")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=min(len(partners), 6), fontsize=9)
+    ax.grid(alpha=0.25)
+    ax.spines[["top", "right"]].set_visible(False)
+    if n_hours <= 7 * 24:
+        ax.xaxis.set_major_locator(mdates.DayLocator())
+    elif n_hours <= 31 * 24:
+        ax.xaxis.set_major_locator(mdates.DayLocator(interval=3))
+    else:
+        ax.xaxis.set_major_locator(mdates.WeekdayLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d-%b"))
+    fig.autofmt_xdate(rotation=30)
+    fig.tight_layout()
+    return fig, ax
+
+
 def plot_residual_vs_flexibility(residual_stats, flex_gen, flex_cap, area='FR', lang='FR'):
     """Two charts comparing residual-demand indicators against flexible-asset sizing,
     across climate years: (1) residual energy balance vs flexible generation,
@@ -2889,6 +3070,105 @@ def plot_residual_vs_flexibility(residual_stats, flex_gen, flex_cap, area='FR', 
     plt.tight_layout()
 
     return fig1, fig2
+
+
+def plot_fr_vs_row_renewables(fr, rest_of_europe, lang='FR'):
+    """Scatter of French vs rest-of-Europe renewable production (solar+wind+hydro), one
+    point per climate year, colored by year. Axes are independently scaled (rest-of-Europe
+    is a many-country sum, so it's naturally much larger than FR alone — a y=x reference
+    wouldn't mean anything here); a linear trend line is shown instead, to read off whether
+    the two move together or in opposite directions across climate years.
+
+    Parameters
+    ----------
+    fr, rest_of_europe : pd.Series (index=year) — e.g. utils_batch.load_area_renewable_prod's
+        "FR" column and the sum of every other column, both in TWh/yr.
+    lang : "FR" or "EN"
+    """
+    years = sorted(set(fr.index) & set(rest_of_europe.index))
+    if not years:
+        print('No overlapping years to plot.')
+        return None
+    x = fr.reindex(years)
+    y = rest_of_europe.reindex(years)
+
+    fig, ax = plt.subplots(figsize=(8, 6.5))
+    sc = ax.scatter(x, y, c=years, cmap='viridis', s=80, edgecolor='black', linewidth=0.6, zorder=3)
+    for yr in years:
+        ax.annotate(str(yr), (x[yr], y[yr]), fontsize=7, xytext=(5, 5), textcoords='offset points')
+
+    if len(years) > 1:
+        slope, intercept = np.polyfit(x, y, 1)
+        x_line = np.array([x.min(), x.max()])
+        corr = np.corrcoef(x, y)[0, 1]
+        ax.plot(x_line, slope * x_line + intercept, '--', color='grey', lw=1.3, zorder=1,
+               label=f'Tendance (r={corr:.2f})' if lang == 'FR' else f'Trend (r={corr:.2f})')
+
+    ax.set_xlabel('Production ENR France [TWh/an]' if lang == 'FR' else 'French renewable production [TWh/yr]')
+    ax.set_ylabel("Production ENR reste de l'Europe [TWh/an]" if lang == 'FR' else 'Rest-of-Europe renewable production [TWh/yr]')
+    ax.set_title("ENR (solaire+éolien+hydro) : France vs reste de l'Europe" if lang == 'FR'
+                else 'Renewables (solar+wind+hydro): France vs rest of Europe', fontweight='bold')
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label('Année' if lang == 'FR' else 'Year')
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+    return fig
+
+
+def plot_residual_peak_vs_flex_stack(peak_pre_dsm, flex_cap_groups, area='FR', lang='FR', group_colors=None):
+    """Peak residual demand (pre-DSM, GW) per year plotted against a stacked bar of
+    flexible/dispatchable capacity, broken down by technology group.
+
+    Parameters
+    ----------
+    peak_pre_dsm : pd.Series (index=year) — e.g. utils_batch.compute_pre_dsm_residual_peak's
+        output, or residual_load_stats.csv's "peak_gw_pre_dsm" column for newer batches.
+    flex_cap_groups : pd.DataFrame (index=year, columns=group name) — e.g.
+        utils_batch.aggregate_df applied to installed_power_GW data with groups like
+        {"Nucleaire": ["nuclear"], "Thermique": [...], "Batteries": [...], "STEP": ["phs"],
+        "Lac": ["lake"], "DSM": [...]}.
+    area : str — used only in the title.
+    lang : "FR" or "EN"
+    group_colors : dict, optional — overrides/extends the built-in defaults below.
+    """
+    years = sorted(set(peak_pre_dsm.index) | set(flex_cap_groups.index))
+    if not years:
+        print('No data to plot.')
+        return None
+    peak = peak_pre_dsm.reindex(years)
+    cap = flex_cap_groups.reindex(years).fillna(0.0)
+
+    default_colors = {
+        'Nucleaire': '#7B1FA2', 'Nuclear': '#7B1FA2',
+        'Thermique': '#E53935', 'Thermal': '#E53935',
+        'Batteries': '#F57F17', 'STEP': '#006064', 'PHS': '#006064',
+        'Lac': '#26C6DA', 'Lake': '#26C6DA',
+        'DSM': '#A5D6A7',
+        'Imports': '#607D8B',
+    }
+    colors = {**default_colors, **(group_colors or {})}
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+    bottom = np.zeros(len(years))
+    for group in cap.columns:
+        vals = cap[group].to_numpy()
+        ax.bar(years, vals, bottom=bottom, color=colors.get(group, '#888'), label=group, width=0.7,
+              edgecolor='white', linewidth=0.4, zorder=2)
+        bottom += vals
+
+    ax.plot(years, peak.to_numpy(), 'o-', color='black', lw=2.2, zorder=3,
+           label='Pic demande résiduelle (avant DSM)' if lang == 'FR' else 'Residual demand peak (pre-DSM)')
+
+    ax.set_xlabel('Année climatique' if lang == 'FR' else 'Climate year')
+    ax.set_ylabel('Puissance [GW]' if lang == 'FR' else 'Power [GW]')
+    ax.set_title(f'Pic de demande résiduelle vs capacité flexible — {area}' if lang == 'FR'
+                else f'Residual demand peak vs flexible capacity — {area}', fontweight='bold')
+    ax.legend(fontsize=9, ncol=2)
+    ax.grid(axis='y', alpha=0.3)
+    ax.spines[['top', 'right']].set_visible(False)
+    plt.tight_layout()
+    return fig
 
 
 def plot_capacity_duals_heatmap(duals_by_group, group_labels=None, lang='FR'):
@@ -3030,6 +3310,9 @@ def save_residual_load(m, output_dir):
     for area in m.countries:
         try:
             residual, demand, vre = compute_residual_demand(m.hourly_balance, area=area)
+            # Pre-DSM peak: sizes flexible/dispatchable capacity against the peak DSM would
+            # otherwise shave, instead of the (already load-shifted) peak_gw below.
+            residual_pre_dsm, _, _ = compute_residual_demand(m.hourly_balance, area=area, use_shifted=False)
 
             pos_area_gwh = float(np.maximum(residual, 0).sum())
             neg_area_gwh = float(abs(np.minimum(residual, 0).sum()))
@@ -3044,6 +3327,7 @@ def save_residual_load(m, output_dir):
             rows.append({
                 "area":               area,
                 "peak_gw":            stats["peak_gw"],
+                "peak_gw_pre_dsm":    float(residual_pre_dsm.max()),
                 "min_gw":             stats["min_gw"],
                 "mean_residual_gw":   stats["mean_residual_gw"],
                 "mean_demand_gw":     stats["mean_demand_gw"],
