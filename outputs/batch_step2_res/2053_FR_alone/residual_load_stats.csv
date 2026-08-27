@@ -1,0 +1,2 @@
+area,peak_gw,min_gw,mean_residual_gw,mean_demand_gw,mean_vre_gw,vre_coverage_pct,hours_negative,pct_negative,peak_hour,positive_area_GWh,negative_area_GWh
+FR,59.214223180914004,-135.979628408085,-2.476775350283157,59.66405001786979,62.14082536815295,104.15120218882453,4235,48.34474885844749,8111,97941.18560732539,119637.73767580582

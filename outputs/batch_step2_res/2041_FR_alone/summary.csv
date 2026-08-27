@@ -1,0 +1,39 @@
+,0
+total system cost [1e9€],38.613128738129134
+elec_demand_tot [TWh],514.4408320945456
+H2_demand_tot [TWh],46.296599999999984
+CH4_demand_tot [TWh],140.60122854145868
+elec_price_weighted_by_demand [€/MWh],38.529876557675756
+CH4_price_weighted_by_demand [€/MWh],0.3778619341991569
+H2_price_weighted_by_demand [€/MWh],0.032651483771964356
+load_shifted [TWh],18.248687616312086
+load_shifted [%],3.547286000221359
+attributed_cost [1e9€],53.62759813822878
+primary_gene_elec [TWh],649.5956053233677
+gene_elec [TWh],660.261516721211
+gene_curtailed [TWh],57.16349220994038
+gene_curtailed [%],8.799858210476112
+imports [TWh/yr],0.0
+exports [TWh/yr],0.0
+net_imports [TWh/yr],0.0
+lost_load [TWh/yr],0.0
+lost_load [% of demand],0.0
+primary_gene_CH4 [TWh],160.3794680342981
+gene_CH4 [TWh],160.3794680342981
+gene_H2 [TWh],67.35584731258204
+biogas_import [TWh/yr],0.0
+H2_import [TWh/yr],0.0
+CH4_imports [TWh/yr],0.0
+CH4_exports [TWh/yr],0.0
+CH4_net_imports [TWh/yr],0.0
+lcoe_elec [€/MWh],70.27263461097684
+lcoe_CH4 [€/MWh],43.81034407102064
+lcoe_H2 [€/MWh],19.641991617012444
+lcoe_elec_volume [€/MWh],79.02741334102937
+lcoe_CH4_volume [€/MWh],45.56826798140399
+lcoe_H2_volume [€/MWh],141.81852231261504
+lcoe_elec_value [€/MWh],88.42278437094707
+lcoe_CH4_value [€/MWh],45.568267997383074
+lcoe_H2_value [€/MWh],37.41857733362022
+transport_and_distrib_lcoe [€/yr/MWh],
+footprint [MtCO2eq/yr],8.60240193521246
